@@ -138,14 +138,15 @@ func (h *hostContext) queryPaths(ctx context.Context, dst IA) ([]*Path, error) {
 	for i, p := range snetPaths {
 		snetMetadata := p.Metadata()
 		metadata := &PathMetadata{
-			Interfaces:   convertPathInterfaceSlice(snetMetadata.Interfaces),
-			MTU:          snetMetadata.MTU,
-			Latency:      snetMetadata.Latency,
-			Bandwidth:    snetMetadata.Bandwidth,
-			Geo:          snetMetadata.Geo,
-			LinkType:     snetMetadata.LinkType,
-			InternalHops: snetMetadata.InternalHops,
-			Notes:        snetMetadata.Notes,
+			Interfaces:     convertPathInterfaceSlice(snetMetadata.Interfaces),
+			MTU:            snetMetadata.MTU,
+			Latency:        snetMetadata.Latency,
+			Bandwidth:      snetMetadata.Bandwidth,
+			Geo:            snetMetadata.Geo,
+			LinkType:       snetMetadata.LinkType,
+			InternalHops:   snetMetadata.InternalHops,
+			Notes:          snetMetadata.Notes,
+			FabridPolicies: snetMetadata.FabridPolicies,
 		}
 		underlay := p.UnderlayNextHop().AddrPort()
 		paths[i] = &Path{

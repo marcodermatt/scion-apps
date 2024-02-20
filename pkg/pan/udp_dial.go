@@ -16,6 +16,7 @@ package pan
 
 import (
 	"context"
+	"github.com/scionproto/scion/pkg/experimental/fabrid"
 	"net"
 	"net/netip"
 
@@ -90,6 +91,16 @@ func DialUDP(ctx context.Context, local netip.AddrPort, remote UDPAddr,
 	}, nil
 }
 
+func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr,
+	policy Policy, selector Selector, fabridConfig fabrid.SimpleFabridConfig) (Conn, error) {
+
+	if selector == nil {
+		selector = NewFabridSelector(fabridConfig, ctx)
+	}
+
+	return DialUDP(ctx, local, remote, policy, selector)
+}
+
 type dialedConn struct {
 	baseUDPConn
 
@@ -128,16 +139,16 @@ func (c *dialedConn) Write(b []byte) (int, error) {
 			return 0, errNoPathTo(c.remote.IA)
 		}
 	}
-	return c.baseUDPConn.writeMsg(c.local, c.remote, path, b)
+	return c.baseUDPConn.writeMsg(c.local, c.remote, path, b, nil)
 }
 
 func (c *dialedConn) WriteVia(path *Path, b []byte) (int, error) {
-	return c.baseUDPConn.writeMsg(c.local, c.remote, path, b)
+	return c.baseUDPConn.writeMsg(c.local, c.remote, path, b, nil)
 }
 
 func (c *dialedConn) Read(b []byte) (int, error) {
 	for {
-		n, remote, _, err := c.baseUDPConn.readMsg(b)
+		n, remote, _, _, _, err := c.baseUDPConn.readMsg(b)
 		if err != nil {
 			return n, err
 		}
@@ -150,7 +161,7 @@ func (c *dialedConn) Read(b []byte) (int, error) {
 
 func (c *dialedConn) ReadVia(b []byte) (int, *Path, error) {
 	for {
-		n, remote, fwPath, err := c.baseUDPConn.readMsg(b)
+		n, remote, fwPath, _, _, err := c.baseUDPConn.readMsg(b)
 		if err != nil {
 			return n, nil, err
 		}

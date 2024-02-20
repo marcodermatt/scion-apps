@@ -21,6 +21,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/snet"
 	"math"
 	"net"
 	"net/netip"
@@ -333,6 +336,18 @@ func main() {
 func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy,
 	clientBwp, serverBwp bwtest.Parameters) (clientRes, serverRes bwtest.Result, err error) {
 
+	polIdentifier := snet.FabridPolicyIdentifier{
+		Type:       snet.FabridGlobalPolicy,
+		Identifier: 0,
+		Index:      0,
+	}
+	fabridConfig := fabrid.SimpleFabridConfig{
+		DestinationIA:   addr.IA(serverCCAddr.IA),
+		DestinationAddr: serverCCAddr.IP.String(),
+		ValidationRatio: 255,
+		Policy:          polIdentifier,
+	}
+
 	// Control channel connection
 	ccSelector := pan.NewDefaultSelector()
 	ccConn, err := pan.DialUDP(context.Background(), local, serverCCAddr, policy, ccSelector)
@@ -345,7 +360,7 @@ func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy
 	serverDCAddr := serverCCAddr.WithPort(serverCCAddr.Port + 1)
 
 	// Data channel connection
-	dcConn, err := pan.DialUDP(context.Background(), dcLocal, serverDCAddr, policy, nil)
+	dcConn, err := pan.DialUDPWithFabrid(context.Background(), dcLocal, serverDCAddr, policy, nil, fabridConfig)
 	if err != nil {
 		return
 	}

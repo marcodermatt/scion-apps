@@ -18,6 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/slayers"
+	"github.com/scionproto/scion/pkg/slayers/extension"
+	"github.com/scionproto/scion/pkg/slayers/path/scion"
+	"github.com/scionproto/scion/pkg/snet"
+	"google.golang.org/grpc"
 	"net"
 	"net/netip"
 	"os"
@@ -99,11 +106,80 @@ func ListenUDP(ctx context.Context, local netip.AddrPort,
 	}, nil
 }
 
+func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
+	selector ReplySelector) (ListenConn, error) {
+
+	local, err := defaultLocalAddr(local)
+	if err != nil {
+		return nil, err
+	}
+
+	if selector == nil {
+		selector = NewDefaultReplySelector()
+	}
+	stats.subscribe(selector)
+	raw, slocal, err := openBaseUDPConn(ctx, local)
+	if err != nil {
+		return nil, err
+	}
+	selector.Initialize(slocal)
+
+	if len(os.Getenv("SCION_GO_INTEGRATION")) > 0 {
+		fmt.Printf("Listening addr=%s\n", slocal)
+	}
+
+	servicesInfo, err := host().sciond.SVCInfo(ctx, []addr.SVC{addr.SvcCS})
+	if err != nil {
+		fmt.Println("Error getting services")
+		return nil, err
+	}
+	controlServiceInfo := servicesInfo[addr.SvcCS][0]
+	localAddr := &net.TCPAddr{
+		IP:   local.Addr().AsSlice(),
+		Port: 0,
+	}
+	controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
+	if err != nil {
+		fmt.Println("Error resolving CS")
+		return nil, err
+	}
+
+	fmt.Println("CS:", controlServiceInfo)
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		return net.DialTCP("tcp", localAddr, controlAddr)
+	}
+	grpcconn, err := grpc.DialContext(ctx, controlServiceInfo,
+		grpc.WithInsecure(), grpc.WithContextDialer(dialer))
+	if err != nil {
+		fmt.Println("Error connection to CS")
+		return nil, err
+	}
+
+	return &fabridListenConn{
+		listenConn: listenConn{
+			baseUDPConn: baseUDPConn{
+				raw: raw,
+			},
+			local:    slocal,
+			selector: selector,
+		},
+		fabridState: make(map[snet.UDPAddr]*fabrid.ServerState),
+		grpcConn:    grpcconn,
+	}, nil
+}
+
 type listenConn struct {
 	baseUDPConn
 
 	local    UDPAddr
 	selector ReplySelector
+}
+
+type fabridListenConn struct {
+	listenConn
+
+	fabridState map[snet.UDPAddr]*fabrid.ServerState
+	grpcConn    *grpc.ClientConn
 }
 
 func (c *listenConn) LocalAddr() net.Addr {
@@ -116,7 +192,7 @@ func (c *listenConn) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (c *listenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
-	n, remote, fwPath, err := c.baseUDPConn.readMsg(b)
+	n, remote, fwPath, _, _, err := c.baseUDPConn.readMsg(b)
 	if err != nil {
 		return n, UDPAddr{}, nil, err
 	}
@@ -141,7 +217,7 @@ func (c *listenConn) WriteTo(b []byte, dst net.Addr) (int, error) {
 }
 
 func (c *listenConn) WriteToVia(b []byte, dst UDPAddr, path *Path) (int, error) {
-	return c.baseUDPConn.writeMsg(c.local, dst, path, b)
+	return c.baseUDPConn.writeMsg(c.local, dst, path, b, nil)
 }
 
 func (c *listenConn) Close() error {
@@ -160,6 +236,86 @@ func NewDefaultReplySelector() *DefaultReplySelector {
 	return &DefaultReplySelector{
 		remotes: make(map[UDPAddr]remoteEntry),
 	}
+}
+
+func (c *fabridListenConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, remote, _, err := c.ReadFromVia(b)
+	return n, remote, err
+}
+
+func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
+	n, panRemote, fwPath, hbhExt, _, err := c.baseUDPConn.readMsg(b)
+	if err != nil {
+		return n, UDPAddr{}, nil, err
+	}
+
+	remote := *panRemote.snetUDPAddr()
+
+	// Check extensions for relevant options
+	var identifierOption *extension.IdentifierOption
+	var fabridOption *extension.FabridOption
+	if hbhExt != nil {
+		for _, opt := range hbhExt.Options {
+			switch opt.OptType {
+			case slayers.OptTypeIdentifier:
+				decoded := scion.Decoded{}
+				decoded.DecodeFromBytes(fwPath.dataplanePath.(snet.RawPath).Raw)
+				baseTimestamp := decoded.InfoFields[0].Timestamp
+				identifierOption, err = extension.ParseIdentifierOption(opt, baseTimestamp)
+				if err != nil {
+					return 0, UDPAddr{}, nil, err
+				}
+			case slayers.OptTypeFabrid:
+				fabridOption, err = extension.ParseFabridOptionFullExtension(opt, (opt.OptDataLen-4)/4)
+				if err != nil {
+					return 0, UDPAddr{}, nil, err
+				}
+			}
+		}
+	}
+	if fabridOption != nil && identifierOption != nil {
+		state, found := c.fabridState[remote]
+		if !found {
+			hostASKey, err := fabrid.FetchHostASKey(*c.local.snetUDPAddr(), identifierOption.Timestamp, remote.IA, c.grpcConn)
+			if err != nil {
+				return 0, UDPAddr{}, nil, err
+			}
+			pathKey, err := fabrid.DeriveHostHostKey(remote.Host.IP.String(), hostASKey)
+			if err != nil {
+				return 0, UDPAddr{}, nil, err
+			}
+			state = fabrid.NewFabridServerState(remote, pathKey)
+			c.fabridState[remote] = state
+		}
+
+		if fabridOption != nil && identifierOption != nil {
+			_, err := fabrid.HandleFabridOption(fabridOption, identifierOption, state)
+			if err != nil {
+				return 0, UDPAddr{}, nil, err
+			}
+		}
+
+	}
+
+	path, err := reversePathFromForwardingPath(panRemote.IA, c.local.IA, fwPath)
+	c.selector.Record(panRemote, path)
+
+	return n, panRemote, path, err
+}
+
+func (c *fabridListenConn) writeFabridReply(dst net.Addr, e2eExt *slayers.EndToEndExtn) (int, error) {
+	sdst, ok := dst.(UDPAddr)
+	if !ok {
+		return 0, errBadDstAddress
+	}
+	var path *Path
+	if c.local.IA != sdst.IA {
+		path = c.selector.Path(sdst)
+		if path == nil {
+			return 0, errNoPathTo(sdst.IA)
+		}
+	}
+	return c.baseUDPConn.writeMsg(c.local, sdst, path, nil, e2eExt)
 }
 
 func (s *DefaultReplySelector) Initialize(local UDPAddr) {

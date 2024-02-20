@@ -17,6 +17,14 @@ package pan
 import (
 	"context"
 	"fmt"
+	drhelper "github.com/scionproto/scion/pkg/daemon/helper"
+	"github.com/scionproto/scion/pkg/drkey"
+	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/private/common"
+	drpb "github.com/scionproto/scion/pkg/proto/control_plane"
+	"github.com/scionproto/scion/pkg/snet"
+	snetpath "github.com/scionproto/scion/pkg/snet/path"
+	"google.golang.org/grpc"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -321,4 +329,179 @@ func (s *PingingSelector) Close() error {
 	}
 	s.pingerCancel()
 	return s.pinger.Close()
+}
+
+// FabridSelector is a Selector for a single dialed socket.
+type FabridSelector struct {
+	mutex        sync.Mutex
+	paths        []*Path
+	current      int
+	activePaths  int
+	fabridConfig fabrid.SimpleFabridConfig
+	ctx          context.Context
+}
+
+func NewFabridSelector(fabridConfig fabrid.SimpleFabridConfig, ctx context.Context) *FabridSelector {
+	return &FabridSelector{
+		fabridConfig: fabridConfig,
+		ctx:          ctx,
+	}
+}
+
+func (s *FabridSelector) Path() *Path {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if len(s.paths) == 0 {
+		return nil
+	}
+	return s.paths[s.current]
+}
+
+func convertInterfaces(interfaces []PathInterface) []snet.PathInterface {
+	snetInterfaces := make([]snet.PathInterface, len(interfaces))
+	for i, pathInterface := range interfaces {
+		snetInterfaces[i] = snet.PathInterface{
+			ID: common.IFIDType(pathInterface.IfID),
+			IA: addr.IA(pathInterface.IA),
+		}
+	}
+	return snetInterfaces
+}
+
+func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	for _, path := range paths {
+		dataplanePath := path.ForwardingPath.dataplanePath
+
+		ifaces := path.Metadata.Interfaces
+		hops := make([]snet.FabridPolicyPerHop, 0, len(ifaces)/2+1)
+
+		hops = append(hops, snet.FabridPolicyPerHop{
+			Pol:    &s.fabridConfig.Policy,
+			IA:     addr.IA(ifaces[0].IA),
+			Egress: uint16(ifaces[0].IfID),
+		})
+
+		for i := 1; i < len(ifaces)-1; i += 2 {
+			hops = append(hops, snet.FabridPolicyPerHop{
+				Pol:     &s.fabridConfig.Policy,
+				IA:      addr.IA(ifaces[i].IA),
+				Ingress: uint16(ifaces[i].IfID),
+				Egress:  uint16(ifaces[i+1].IfID),
+			})
+		}
+		hops = append(hops, snet.FabridPolicyPerHop{
+			Pol:     &s.fabridConfig.Policy,
+			IA:      addr.IA(ifaces[len(ifaces)-1].IA),
+			Ingress: uint16(ifaces[len(ifaces)-1].IfID),
+		})
+
+		switch previous_path := dataplanePath.(type) {
+		case snetpath.SCION:
+			fabridConfig := &snetpath.FabridConfig{
+				LocalIA:         addr.IA(local.IA),
+				LocalAddr:       local.IP.String(),
+				DestinationIA:   addr.IA(remote.IA),
+				DestinationAddr: remote.IP.String(),
+			}
+			fabridPath, err := snetpath.NewFABRIDDataplanePath(previous_path, convertInterfaces(path.Metadata.Interfaces),
+				hops, fabridConfig)
+			if err != nil {
+				fmt.Println("Error creating FABRID path", "err", err)
+				return
+			}
+			servicesInfo, err := host().sciond.SVCInfo(s.ctx, []addr.SVC{addr.SvcCS})
+			if err != nil {
+				fmt.Println("Error getting services", "err", err)
+				return
+			}
+			controlServiceInfo := servicesInfo[addr.SvcCS][0]
+			localAddr := &net.TCPAddr{
+				IP:   net.IP(local.IP.AsSlice()),
+				Port: 0,
+			}
+			controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
+			if err != nil {
+				fmt.Println("Error resolving CS", "err", err)
+				return
+			}
+
+			fmt.Println("CS:", controlServiceInfo)
+			dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+				return net.DialTCP("tcp", localAddr, controlAddr)
+			}
+			grpcconn, err := grpc.DialContext(s.ctx, controlServiceInfo,
+				grpc.WithInsecure(), grpc.WithContextDialer(dialer))
+			if err != nil {
+				fmt.Println("Error connection to CS", "err", err)
+				return
+			}
+			client := drpb.NewDRKeyIntraServiceClient(grpcconn)
+			fabridPath.RegisterDRKeyFetcher(func(ctx context.Context, meta drkey.ASHostMeta) (drkey.ASHostKey, error) {
+				rep, err := client.DRKeyASHost(ctx, drhelper.AsHostMetaToProtoRequest(meta))
+				if err != nil {
+					return drkey.ASHostKey{}, err
+				}
+				key, err := drhelper.GetASHostKeyFromReply(rep, meta)
+				if err != nil {
+					return drkey.ASHostKey{}, err
+				}
+				return key, nil
+			}, func(ctx context.Context, meta drkey.HostHostMeta) (drkey.HostHostKey, error) {
+				rep, err := client.DRKeyHostHost(ctx, drhelper.HostHostMetaToProtoRequest(meta))
+				if err != nil {
+					return drkey.HostHostKey{}, err
+				}
+				key, err := drhelper.GetHostHostKeyFromReply(rep, meta)
+				if err != nil {
+					return drkey.HostHostKey{}, err
+				}
+				return key, nil
+			})
+			path.ForwardingPath.dataplanePath = fabridPath
+		}
+	}
+
+	s.paths = paths
+	s.current = 0
+}
+
+func (s *FabridSelector) Refresh(paths []*Path) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	newcurrent := 0
+	if len(s.paths) > 0 {
+		currentFingerprint := s.paths[s.current].Fingerprint
+		for i, p := range paths {
+			if p.Fingerprint == currentFingerprint {
+				newcurrent = i
+				break
+			}
+		}
+	}
+	s.paths = paths
+	s.current = newcurrent
+}
+
+func (s *FabridSelector) PathDown(pf PathFingerprint, pi PathInterface) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if current := s.paths[s.current]; isInterfaceOnPath(current, pi) || pf == current.Fingerprint {
+		fmt.Println("down:", s.current, len(s.paths))
+		better := stats.FirstMoreAlive(current, s.paths)
+		if better >= 0 {
+			// Try next path. Note that this will keep cycling if we get down notifications
+			s.current = better
+			fmt.Println("failover:", s.current, len(s.paths))
+		}
+	}
+}
+
+func (s *FabridSelector) Close() error {
+	return nil
 }

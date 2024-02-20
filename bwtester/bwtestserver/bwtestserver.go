@@ -287,7 +287,7 @@ func (r resultsMap) purgeExpired() {
 }
 
 func listenConnected(local netip.AddrPort, remote pan.UDPAddr, selector pan.ReplySelector) (net.Conn, error) {
-	conn, err := pan.ListenUDP(context.Background(), local, selector)
+	conn, err := pan.ListenUDPWithFabrid(context.Background(), local, selector)
 	return connectedPacketConn{
 		ListenConn: conn,
 		remote:     remote,
