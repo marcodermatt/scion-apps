@@ -19,6 +19,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/snet"
 	"net/netip"
 	"os"
 	"time"
@@ -49,7 +52,7 @@ func main() {
 }
 
 func runServer(listen netip.AddrPort) error {
-	conn, err := pan.ListenUDP(context.Background(), listen, nil)
+	conn, err := pan.ListenUDPWithFabrid(context.Background(), listen, nil)
 	if err != nil {
 		return err
 	}
@@ -74,11 +77,23 @@ func runServer(listen netip.AddrPort) error {
 }
 
 func runClient(address string, count int) error {
-	addr, err := pan.ResolveUDPAddr(context.TODO(), address)
+	udpAddr, err := pan.ResolveUDPAddr(context.TODO(), address)
 	if err != nil {
 		return err
 	}
-	conn, err := pan.DialUDP(context.Background(), netip.AddrPort{}, addr, nil, nil)
+	polIdentifier := snet.FabridPolicyIdentifier{
+		Type:       snet.FabridGlobalPolicy,
+		Identifier: 0,
+		Index:      0,
+	}
+	fabridConfig := fabrid.SimpleFabridConfig{
+		DestinationIA:   addr.IA(udpAddr.IA),
+		DestinationAddr: udpAddr.IP.String(),
+		ValidationRatio: 255,
+		Policy:          polIdentifier,
+	}
+
+	conn, err := pan.DialUDPWithFabrid(context.Background(), netip.AddrPort{}, udpAddr, nil, nil, fabridConfig)
 	if err != nil {
 		return err
 	}
