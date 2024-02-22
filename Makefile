@@ -24,6 +24,7 @@ build: scion-bat \
 	scion-web-gateway \
 	example-helloworld \
 	example-helloquic \
+	example-hellofabrid \
 	example-shttp-client example-shttp-server example-shttp-fileserver example-shttp-proxy \
 	example-sgrpc-server example-sgrpc-client
 
@@ -105,6 +106,10 @@ example-helloworld:
 .PHONY: example-helloquic
 example-helloquic:
 	cd _examples && go build -tags=$(TAGS) -o ../$(BIN)/$@ ./helloquic/
+
+.PHONY: example-hellofabrid
+example-hellofabrid:
+	cd _examples && go build -tags=$(TAGS) -o ../$(BIN)/$@ ./hellofabrid/
 
 .PHONY: example-shttp-client
 example-shttp-client:
