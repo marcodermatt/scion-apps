@@ -16,7 +16,12 @@ package pan
 
 import (
 	"context"
+	"fmt"
+	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/slayers"
+	"github.com/scionproto/scion/pkg/slayers/extension"
+	"github.com/scionproto/scion/pkg/snet"
 	"net"
 	"net/netip"
 
@@ -92,13 +97,40 @@ func DialUDP(ctx context.Context, local netip.AddrPort, remote UDPAddr,
 }
 
 func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr,
-	policy Policy, selector Selector, fabridConfig fabrid.SimpleFabridConfig) (Conn, error) {
+	policy Policy, fabridConfig fabrid.SimpleFabridConfig) (Conn, error) {
 
-	if selector == nil {
-		selector = NewFabridSelector(fabridConfig, ctx)
+	client := fabrid.NewFabridClient(*remote.snetUDPAddr(), drkey.Key{}, fabridConfig)
+
+	selector := NewFabridSelector(client, ctx)
+
+	local, err := defaultLocalAddr(local)
+	if err != nil {
+		return nil, err
 	}
 
-	return DialUDP(ctx, local, remote, policy, selector)
+	raw, slocal, err := openBaseUDPConn(ctx, local)
+	if err != nil {
+		return nil, err
+	}
+	var subscriber *pathRefreshSubscriber
+	if remote.IA != slocal.IA {
+		subscriber, err = openPathRefreshSubscriber(ctx, slocal, remote, policy, selector)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &fabridDialedConn{
+		dialedConn: dialedConn{
+			baseUDPConn: baseUDPConn{
+				raw: raw,
+			},
+			local:      slocal,
+			remote:     remote,
+			subscriber: subscriber,
+			selector:   selector,
+		},
+		fabridClient: client,
+	}, nil
 }
 
 type dialedConn struct {
@@ -108,6 +140,12 @@ type dialedConn struct {
 	remote     UDPAddr
 	subscriber *pathRefreshSubscriber
 	selector   Selector
+}
+
+type fabridDialedConn struct {
+	dialedConn
+
+	fabridClient *fabrid.Client
 }
 
 func (c *dialedConn) SetPolicy(policy Policy) {
@@ -184,6 +222,47 @@ func (c *dialedConn) Close() error {
 		_ = c.selector.Close()
 	}
 	return c.baseUDPConn.Close()
+}
+
+func (c *fabridDialedConn) Read(b []byte) (int, error) {
+	for {
+		n, remote, fwPath, _, e2eExt, err := c.baseUDPConn.readMsg(b)
+		if err != nil {
+			return n, err
+		}
+		if remote != c.remote {
+			continue // connected! Ignore spurious packets from wrong source
+		}
+
+		// Check extensions for relevant options
+		var fabridControlOption *extension.FabridControlOption
+		if e2eExt != nil {
+			for _, opt := range e2eExt.Options {
+				switch opt.OptType {
+				case slayers.OptTypeFabridControl:
+					fabridControlOption, err = extension.ParseFabridControlOption(opt)
+					if err != nil {
+						return n, err
+					}
+
+				}
+			}
+		}
+		if fabridControlOption != nil {
+			path, err := reversePathFromForwardingPath(c.remote.IA, c.local.IA, fwPath)
+
+			fmt.Println("fabridDialedConn.Read, fabridControlOption:", fabridControlOption)
+			err = c.fabridClient.Paths[snet.PathFingerprint(path.Fingerprint)].HandleFabridControlOption(fabridControlOption)
+			if err != nil {
+				return 0, err
+			}
+			if n == 0 {
+				continue // Don't return empty packets that contain FABRID options
+			}
+
+		}
+		return n, err
+	}
 }
 
 // pathRefreshSubscriber is the glue between a connection and the global path

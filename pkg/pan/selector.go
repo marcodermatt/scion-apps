@@ -337,13 +337,13 @@ type FabridSelector struct {
 	paths        []*Path
 	current      int
 	activePaths  int
-	fabridConfig fabrid.SimpleFabridConfig
+	fabridClient *fabrid.Client
 	ctx          context.Context
 }
 
-func NewFabridSelector(fabridConfig fabrid.SimpleFabridConfig, ctx context.Context) *FabridSelector {
+func NewFabridSelector(client *fabrid.Client, ctx context.Context) *FabridSelector {
 	return &FabridSelector{
-		fabridConfig: fabridConfig,
+		fabridClient: client,
 		ctx:          ctx,
 	}
 }
@@ -380,21 +380,21 @@ func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
 		hops := make([]snet.FabridPolicyPerHop, 0, len(ifaces)/2+1)
 
 		hops = append(hops, snet.FabridPolicyPerHop{
-			Pol:    &s.fabridConfig.Policy,
+			Pol:    &s.fabridClient.Config.Policy,
 			IA:     addr.IA(ifaces[0].IA),
 			Egress: uint16(ifaces[0].IfID),
 		})
 
 		for i := 1; i < len(ifaces)-1; i += 2 {
 			hops = append(hops, snet.FabridPolicyPerHop{
-				Pol:     &s.fabridConfig.Policy,
+				Pol:     &s.fabridClient.Config.Policy,
 				IA:      addr.IA(ifaces[i].IA),
 				Ingress: uint16(ifaces[i].IfID),
 				Egress:  uint16(ifaces[i+1].IfID),
 			})
 		}
 		hops = append(hops, snet.FabridPolicyPerHop{
-			Pol:     &s.fabridConfig.Policy,
+			Pol:     &s.fabridClient.Config.Policy,
 			IA:      addr.IA(ifaces[len(ifaces)-1].IA),
 			Ingress: uint16(ifaces[len(ifaces)-1].IfID),
 		})
@@ -408,7 +408,7 @@ func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
 				DestinationAddr: remote.IP.String(),
 			}
 			fabridPath, err := snetpath.NewFABRIDDataplanePath(previous_path, convertInterfaces(path.Metadata.Interfaces),
-				hops, fabridConfig)
+				hops, fabridConfig, s.fabridClient.NewFabridPathState(snet.PathFingerprint(path.Fingerprint)))
 			if err != nil {
 				fmt.Println("Error creating FABRID path", "err", err)
 				return

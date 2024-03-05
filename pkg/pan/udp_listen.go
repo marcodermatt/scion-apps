@@ -163,8 +163,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 			local:    slocal,
 			selector: selector,
 		},
-		fabridState: make(map[snet.UDPAddr]*fabrid.ServerState),
-		grpcConn:    grpcconn,
+		fabridServer: fabrid.NewFabridServer(slocal.snetUDPAddr(), grpcconn),
 	}, nil
 }
 
@@ -178,8 +177,7 @@ type listenConn struct {
 type fabridListenConn struct {
 	listenConn
 
-	fabridState map[snet.UDPAddr]*fabrid.ServerState
-	grpcConn    *grpc.ClientConn
+	fabridServer *fabrid.Server
 }
 
 func (c *listenConn) LocalAddr() net.Addr {
@@ -244,16 +242,20 @@ func (c *fabridListenConn) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
-	n, panRemote, fwPath, hbhExt, _, err := c.baseUDPConn.readMsg(b)
+	n, panRemote, fwPath, hbhExt, e2eExt, err := c.baseUDPConn.readMsg(b)
 	if err != nil {
 		return n, UDPAddr{}, nil, err
 	}
+
+	path, err := reversePathFromForwardingPath(panRemote.IA, c.local.IA, fwPath)
+	c.selector.Record(panRemote, path)
 
 	remote := *panRemote.snetUDPAddr()
 
 	// Check extensions for relevant options
 	var identifierOption *extension.IdentifierOption
 	var fabridOption *extension.FabridOption
+	var fabridControlOption *extension.FabridControlOption
 	if hbhExt != nil {
 		for _, opt := range hbhExt.Options {
 			switch opt.OptType {
@@ -273,32 +275,31 @@ func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
 			}
 		}
 	}
-	if fabridOption != nil && identifierOption != nil {
-		state, found := c.fabridState[remote]
-		if !found {
-			hostASKey, err := fabrid.FetchHostASKey(*c.local.snetUDPAddr(), identifierOption.Timestamp, remote.IA, c.grpcConn)
-			if err != nil {
-				return 0, UDPAddr{}, nil, err
-			}
-			pathKey, err := fabrid.DeriveHostHostKey(remote.Host.IP.String(), hostASKey)
-			if err != nil {
-				return 0, UDPAddr{}, nil, err
-			}
-			state = fabrid.NewFabridServerState(remote, pathKey)
-			c.fabridState[remote] = state
-		}
+	if e2eExt != nil {
+		for _, opt := range e2eExt.Options {
+			switch opt.OptType {
+			case slayers.OptTypeFabridControl:
+				fabridControlOption, err = extension.ParseFabridControlOption(opt)
+				if err != nil {
+					return 0, UDPAddr{}, nil, err
+				}
 
-		if fabridOption != nil && identifierOption != nil {
-			_, err := fabrid.HandleFabridOption(fabridOption, identifierOption, state)
+			}
+		}
+	}
+	if fabridOption != nil && identifierOption != nil {
+		replyE2eExt, err := c.fabridServer.HandleFabridPacket(remote, fabridOption, identifierOption, fabridControlOption)
+		if err != nil {
+			return 0, UDPAddr{}, nil, err
+		}
+		if replyE2eExt != nil {
+			_, err = c.writeFabridReply(panRemote, replyE2eExt)
 			if err != nil {
 				return 0, UDPAddr{}, nil, err
 			}
 		}
 
 	}
-
-	path, err := reversePathFromForwardingPath(panRemote.IA, c.local.IA, fwPath)
-	c.selector.Record(panRemote, path)
 
 	return n, panRemote, path, err
 }

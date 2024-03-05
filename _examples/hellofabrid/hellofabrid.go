@@ -93,14 +93,14 @@ func runClient(address string, count int) error {
 		Policy:          polIdentifier,
 	}
 
-	conn, err := pan.DialUDPWithFabrid(context.Background(), netip.AddrPort{}, udpAddr, nil, nil, fabridConfig)
+	conn, err := pan.DialUDPWithFabrid(context.Background(), netip.AddrPort{}, udpAddr, nil, fabridConfig)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
 	for i := 0; i < count; i++ {
-		nBytes, err := conn.Write([]byte(fmt.Sprintf("hello world %s", time.Now().Format("15:04:05.0"))))
+		nBytes, err := conn.Write([]byte(fmt.Sprintf("hello fabrid %s", time.Now().Format("15:04:05.0"))))
 		if err != nil {
 			return err
 		}
