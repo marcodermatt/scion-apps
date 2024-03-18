@@ -69,4 +69,6 @@ require (
 	modernc.org/token v1.1.0 // indirect
 )
 
+replace github.com/scionproto/scion => /home/sigma/studies/msc-thesis/scion-fork
+
 replace github.com/netsec-ethz/scion-apps => ../
