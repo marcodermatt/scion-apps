@@ -100,7 +100,6 @@ func (c *baseUDPConn) writeMsg(src, dst UDPAddr, path *Path, b []byte, e2eExt *s
 			E2eExtension: e2eExt,
 		},
 	}
-	fmt.Println("Writing message with payload:", pkt.Payload, "and extension:", pkt.E2eExtension)
 
 	err := c.raw.WriteTo(pkt, net.UDPAddrFromAddrPort(nextHop))
 	if err != nil {

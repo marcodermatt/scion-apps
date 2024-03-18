@@ -360,7 +360,7 @@ func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy
 	serverDCAddr := serverCCAddr.WithPort(serverCCAddr.Port + 1)
 
 	// Data channel connection
-	dcConn, err := pan.DialUDPWithFabrid(context.Background(), dcLocal, serverDCAddr, policy, nil, fabridConfig)
+	dcConn, _, err := pan.DialUDPWithFabrid(context.Background(), dcLocal, serverDCAddr, policy, fabridConfig)
 	if err != nil {
 		return
 	}

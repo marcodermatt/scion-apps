@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/extension"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
@@ -130,7 +131,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 
 	servicesInfo, err := host().sciond.SVCInfo(ctx, []addr.SVC{addr.SvcCS})
 	if err != nil {
-		fmt.Println("Error getting services")
+		log.Error("Error getting services")
 		return nil, err
 	}
 	controlServiceInfo := servicesInfo[addr.SvcCS][0]
@@ -140,18 +141,18 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 	}
 	controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
 	if err != nil {
-		fmt.Println("Error resolving CS")
+		log.Error("Error resolving CS")
 		return nil, err
 	}
 
-	fmt.Println("CS:", controlServiceInfo)
+	log.Debug("Prepared GRPC connection", "CS", controlServiceInfo)
 	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
 		return net.DialTCP("tcp", localAddr, controlAddr)
 	}
 	grpcconn, err := grpc.DialContext(ctx, controlServiceInfo,
 		grpc.WithInsecure(), grpc.WithContextDialer(dialer))
 	if err != nil {
-		fmt.Println("Error connection to CS")
+		log.Error("Error connection to CS")
 		return nil, err
 	}
 
@@ -163,7 +164,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 			local:    slocal,
 			selector: selector,
 		},
-		fabridServer: fabrid.NewFabridServer(slocal.snetUDPAddr(), grpcconn),
+		fabridServer: fabrid.NewFabridServer(slocal.snetUDPAddr(), grpcconn, 128),
 	}, nil
 }
 
@@ -255,7 +256,7 @@ func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
 	// Check extensions for relevant options
 	var identifierOption *extension.IdentifierOption
 	var fabridOption *extension.FabridOption
-	var fabridControlOption *extension.FabridControlOption
+	var fabridControlOptions []*extension.FabridControlOption
 	if hbhExt != nil {
 		for _, opt := range hbhExt.Options {
 			switch opt.OptType {
@@ -279,16 +280,17 @@ func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
 		for _, opt := range e2eExt.Options {
 			switch opt.OptType {
 			case slayers.OptTypeFabridControl:
-				fabridControlOption, err = extension.ParseFabridControlOption(opt)
+				fabridControlOption, err := extension.ParseFabridControlOption(opt)
 				if err != nil {
 					return 0, UDPAddr{}, nil, err
 				}
+				fabridControlOptions = append(fabridControlOptions, fabridControlOption)
 
 			}
 		}
 	}
 	if fabridOption != nil && identifierOption != nil {
-		replyE2eExt, err := c.fabridServer.HandleFabridPacket(remote, fabridOption, identifierOption, fabridControlOption)
+		replyE2eExt, err := c.fabridServer.HandleFabridPacket(remote, fabridOption, identifierOption, fabridControlOptions)
 		if err != nil {
 			return 0, UDPAddr{}, nil, err
 		}

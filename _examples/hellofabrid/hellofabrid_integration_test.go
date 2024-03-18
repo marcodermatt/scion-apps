@@ -38,11 +38,11 @@ func TestHelloFabridSample(t *testing.T) {
 	serverArgs := []string{"-listen", ":" + serverPort}
 
 	// Client
-	clientArgs := []string{"-remote", integration.DstAddrPattern + ":" + serverPort}
+	clientArgs := []string{"-count", "5", "-remote", integration.DstAddrPattern + ":" + serverPort}
 
 	in := integration.NewAppsIntegration(cmd, cmd, clientArgs, serverArgs)
 	in.ServerOutMatch = integration.RegExp("(?m)^Received .*: hello world .*\nWrote 24 bytes")
-	in.ClientOutMatch = integration.RegExp("(?m)^Wrote 22 bytes.\nReceived reply: take it back! .*")
+	in.ClientOutMatch = integration.RegExp("(?m)^Wrote 23 bytes.\nReceived reply: take it back! .*")
 	// Cartesian product of src and dst IAs, a random permutation
 	// restricted to a subset to reduce the number of tests to run without significant
 	// loss of coverage

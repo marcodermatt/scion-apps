@@ -16,7 +16,6 @@ package pan
 
 import (
 	"context"
-	"fmt"
 	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
 	"github.com/scionproto/scion/pkg/slayers"
@@ -97,7 +96,7 @@ func DialUDP(ctx context.Context, local netip.AddrPort, remote UDPAddr,
 }
 
 func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr,
-	policy Policy, fabridConfig fabrid.SimpleFabridConfig) (Conn, error) {
+	policy Policy, fabridConfig fabrid.SimpleFabridConfig) (Conn, *fabrid.Client, error) {
 
 	client := fabrid.NewFabridClient(*remote.snetUDPAddr(), drkey.Key{}, fabridConfig)
 
@@ -105,18 +104,18 @@ func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr
 
 	local, err := defaultLocalAddr(local)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	raw, slocal, err := openBaseUDPConn(ctx, local)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var subscriber *pathRefreshSubscriber
 	if remote.IA != slocal.IA {
 		subscriber, err = openPathRefreshSubscriber(ctx, slocal, remote, policy, selector)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	return &fabridDialedConn{
@@ -130,7 +129,7 @@ func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr
 			selector:   selector,
 		},
 		fabridClient: client,
-	}, nil
+	}, client, nil
 }
 
 type dialedConn struct {
@@ -237,6 +236,10 @@ func (c *fabridDialedConn) Read(b []byte) (int, error) {
 		// Check extensions for relevant options
 		var fabridControlOption *extension.FabridControlOption
 		if e2eExt != nil {
+			path, err := reversePathFromForwardingPath(c.remote.IA, c.local.IA, fwPath)
+			if err != nil {
+				return 0, err
+			}
 			for _, opt := range e2eExt.Options {
 				switch opt.OptType {
 				case slayers.OptTypeFabridControl:
@@ -245,21 +248,22 @@ func (c *fabridDialedConn) Read(b []byte) (int, error) {
 						return n, err
 					}
 
+					pathState, err := c.fabridClient.GetFabridPathState(snet.PathFingerprint(path.Fingerprint))
+					if err != nil {
+						return n, err
+					}
+					err = pathState.HandleFabridControlOption(fabridControlOption)
+					if err != nil {
+						return 0, err
+					}
+
 				}
 			}
 		}
 		if fabridControlOption != nil {
-			path, err := reversePathFromForwardingPath(c.remote.IA, c.local.IA, fwPath)
-
-			fmt.Println("fabridDialedConn.Read, fabridControlOption:", fabridControlOption)
-			err = c.fabridClient.Paths[snet.PathFingerprint(path.Fingerprint)].HandleFabridControlOption(fabridControlOption)
-			if err != nil {
-				return 0, err
-			}
 			if n == 0 {
 				continue // Don't return empty packets that contain FABRID options
 			}
-
 		}
 		return n, err
 	}

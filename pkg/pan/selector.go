@@ -20,6 +20,7 @@ import (
 	drhelper "github.com/scionproto/scion/pkg/daemon/helper"
 	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/common"
 	drpb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/snet"
@@ -373,96 +374,95 @@ func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	for _, path := range paths {
-		dataplanePath := path.ForwardingPath.dataplanePath
+	path := paths[0]
+	dataplanePath := path.ForwardingPath.dataplanePath
 
-		ifaces := path.Metadata.Interfaces
-		hops := make([]snet.FabridPolicyPerHop, 0, len(ifaces)/2+1)
+	ifaces := path.Metadata.Interfaces
+	hops := make([]snet.FabridPolicyPerHop, 0, len(ifaces)/2+1)
 
-		hops = append(hops, snet.FabridPolicyPerHop{
-			Pol:    &s.fabridClient.Config.Policy,
-			IA:     addr.IA(ifaces[0].IA),
-			Egress: uint16(ifaces[0].IfID),
-		})
+	hops = append(hops, snet.FabridPolicyPerHop{
+		Pol:    &s.fabridClient.Config.Policy,
+		IA:     addr.IA(ifaces[0].IA),
+		Egress: uint16(ifaces[0].IfID),
+	})
 
-		for i := 1; i < len(ifaces)-1; i += 2 {
-			hops = append(hops, snet.FabridPolicyPerHop{
-				Pol:     &s.fabridClient.Config.Policy,
-				IA:      addr.IA(ifaces[i].IA),
-				Ingress: uint16(ifaces[i].IfID),
-				Egress:  uint16(ifaces[i+1].IfID),
-			})
-		}
+	for i := 1; i < len(ifaces)-1; i += 2 {
 		hops = append(hops, snet.FabridPolicyPerHop{
 			Pol:     &s.fabridClient.Config.Policy,
-			IA:      addr.IA(ifaces[len(ifaces)-1].IA),
-			Ingress: uint16(ifaces[len(ifaces)-1].IfID),
+			IA:      addr.IA(ifaces[i].IA),
+			Ingress: uint16(ifaces[i].IfID),
+			Egress:  uint16(ifaces[i+1].IfID),
 		})
+	}
+	hops = append(hops, snet.FabridPolicyPerHop{
+		Pol:     &s.fabridClient.Config.Policy,
+		IA:      addr.IA(ifaces[len(ifaces)-1].IA),
+		Ingress: uint16(ifaces[len(ifaces)-1].IfID),
+	})
 
-		switch previous_path := dataplanePath.(type) {
-		case snetpath.SCION:
-			fabridConfig := &snetpath.FabridConfig{
-				LocalIA:         addr.IA(local.IA),
-				LocalAddr:       local.IP.String(),
-				DestinationIA:   addr.IA(remote.IA),
-				DestinationAddr: remote.IP.String(),
-			}
-			fabridPath, err := snetpath.NewFABRIDDataplanePath(previous_path, convertInterfaces(path.Metadata.Interfaces),
-				hops, fabridConfig, s.fabridClient.NewFabridPathState(snet.PathFingerprint(path.Fingerprint)))
-			if err != nil {
-				fmt.Println("Error creating FABRID path", "err", err)
-				return
-			}
-			servicesInfo, err := host().sciond.SVCInfo(s.ctx, []addr.SVC{addr.SvcCS})
-			if err != nil {
-				fmt.Println("Error getting services", "err", err)
-				return
-			}
-			controlServiceInfo := servicesInfo[addr.SvcCS][0]
-			localAddr := &net.TCPAddr{
-				IP:   net.IP(local.IP.AsSlice()),
-				Port: 0,
-			}
-			controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
-			if err != nil {
-				fmt.Println("Error resolving CS", "err", err)
-				return
-			}
-
-			fmt.Println("CS:", controlServiceInfo)
-			dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-				return net.DialTCP("tcp", localAddr, controlAddr)
-			}
-			grpcconn, err := grpc.DialContext(s.ctx, controlServiceInfo,
-				grpc.WithInsecure(), grpc.WithContextDialer(dialer))
-			if err != nil {
-				fmt.Println("Error connection to CS", "err", err)
-				return
-			}
-			client := drpb.NewDRKeyIntraServiceClient(grpcconn)
-			fabridPath.RegisterDRKeyFetcher(func(ctx context.Context, meta drkey.ASHostMeta) (drkey.ASHostKey, error) {
-				rep, err := client.DRKeyASHost(ctx, drhelper.AsHostMetaToProtoRequest(meta))
-				if err != nil {
-					return drkey.ASHostKey{}, err
-				}
-				key, err := drhelper.GetASHostKeyFromReply(rep, meta)
-				if err != nil {
-					return drkey.ASHostKey{}, err
-				}
-				return key, nil
-			}, func(ctx context.Context, meta drkey.HostHostMeta) (drkey.HostHostKey, error) {
-				rep, err := client.DRKeyHostHost(ctx, drhelper.HostHostMetaToProtoRequest(meta))
-				if err != nil {
-					return drkey.HostHostKey{}, err
-				}
-				key, err := drhelper.GetHostHostKeyFromReply(rep, meta)
-				if err != nil {
-					return drkey.HostHostKey{}, err
-				}
-				return key, nil
-			})
-			path.ForwardingPath.dataplanePath = fabridPath
+	switch previous_path := dataplanePath.(type) {
+	case snetpath.SCION:
+		fabridConfig := &snetpath.FabridConfig{
+			LocalIA:         addr.IA(local.IA),
+			LocalAddr:       local.IP.String(),
+			DestinationIA:   addr.IA(remote.IA),
+			DestinationAddr: remote.IP.String(),
 		}
+		fabridPath, err := snetpath.NewFABRIDDataplanePath(previous_path, convertInterfaces(path.Metadata.Interfaces),
+			hops, fabridConfig, s.fabridClient.NewFabridPathState(snet.PathFingerprint(path.Fingerprint)))
+		if err != nil {
+			log.Error("Error creating FABRID path", "err", err)
+			return
+		}
+		servicesInfo, err := host().sciond.SVCInfo(s.ctx, []addr.SVC{addr.SvcCS})
+		if err != nil {
+			log.Error("Error getting services", "err", err)
+			return
+		}
+		controlServiceInfo := servicesInfo[addr.SvcCS][0]
+		localAddr := &net.TCPAddr{
+			IP:   net.IP(local.IP.AsSlice()),
+			Port: 0,
+		}
+		controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
+		if err != nil {
+			log.Error("Error resolving CS", "err", err)
+			return
+		}
+
+		log.Debug("Prepared GRPC connection", "CS", controlServiceInfo)
+		dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+			return net.DialTCP("tcp", localAddr, controlAddr)
+		}
+		grpcconn, err := grpc.DialContext(s.ctx, controlServiceInfo,
+			grpc.WithInsecure(), grpc.WithContextDialer(dialer))
+		if err != nil {
+			log.Error("Error connection to CS", "err", err)
+			return
+		}
+		client := drpb.NewDRKeyIntraServiceClient(grpcconn)
+		fabridPath.RegisterDRKeyFetcher(func(ctx context.Context, meta drkey.ASHostMeta) (drkey.ASHostKey, error) {
+			rep, err := client.DRKeyASHost(ctx, drhelper.AsHostMetaToProtoRequest(meta))
+			if err != nil {
+				return drkey.ASHostKey{}, err
+			}
+			key, err := drhelper.GetASHostKeyFromReply(rep, meta)
+			if err != nil {
+				return drkey.ASHostKey{}, err
+			}
+			return key, nil
+		}, func(ctx context.Context, meta drkey.HostHostMeta) (drkey.HostHostKey, error) {
+			rep, err := client.DRKeyHostHost(ctx, drhelper.HostHostMetaToProtoRequest(meta))
+			if err != nil {
+				return drkey.HostHostKey{}, err
+			}
+			key, err := drhelper.GetHostHostKeyFromReply(rep, meta)
+			if err != nil {
+				return drkey.HostHostKey{}, err
+			}
+			return key, nil
+		})
+		path.ForwardingPath.dataplanePath = fabridPath
 	}
 
 	s.paths = paths
