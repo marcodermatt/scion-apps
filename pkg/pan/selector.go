@@ -25,7 +25,6 @@ import (
 	drpb "github.com/scionproto/scion/pkg/proto/control_plane"
 	"github.com/scionproto/scion/pkg/snet"
 	snetpath "github.com/scionproto/scion/pkg/snet/path"
-	"google.golang.org/grpc"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -408,39 +407,15 @@ func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
 			DestinationIA:   addr.IA(remote.IA),
 			DestinationAddr: remote.IP.String(),
 		}
+		log.Debug("Init selector", "config", fabridConfig)
+		s.fabridClient.NewFabridPathState(snet.PathFingerprint(path.Fingerprint))
 		fabridPath, err := snetpath.NewFABRIDDataplanePath(previous_path, convertInterfaces(path.Metadata.Interfaces),
-			hops, fabridConfig, s.fabridClient.NewFabridPathState(snet.PathFingerprint(path.Fingerprint)))
+			hops, fabridConfig, s.fabridClient, snet.PathFingerprint(path.Fingerprint))
 		if err != nil {
 			log.Error("Error creating FABRID path", "err", err)
 			return
 		}
-		servicesInfo, err := host().sciond.SVCInfo(s.ctx, []addr.SVC{addr.SvcCS})
-		if err != nil {
-			log.Error("Error getting services", "err", err)
-			return
-		}
-		controlServiceInfo := servicesInfo[addr.SvcCS][0]
-		localAddr := &net.TCPAddr{
-			IP:   net.IP(local.IP.AsSlice()),
-			Port: 0,
-		}
-		controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
-		if err != nil {
-			log.Error("Error resolving CS", "err", err)
-			return
-		}
-
-		log.Debug("Prepared GRPC connection", "CS", controlServiceInfo)
-		dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-			return net.DialTCP("tcp", localAddr, controlAddr)
-		}
-		grpcconn, err := grpc.DialContext(s.ctx, controlServiceInfo,
-			grpc.WithInsecure(), grpc.WithContextDialer(dialer))
-		if err != nil {
-			log.Error("Error connection to CS", "err", err)
-			return
-		}
-		client := drpb.NewDRKeyIntraServiceClient(grpcconn)
+		client := drpb.NewDRKeyIntraServiceClient(s.fabridClient.GrpcConn)
 		fabridPath.RegisterDRKeyFetcher(func(ctx context.Context, meta drkey.ASHostMeta) (drkey.ASHostKey, error) {
 			rep, err := client.DRKeyASHost(ctx, drhelper.AsHostMetaToProtoRequest(meta))
 			if err != nil {
@@ -449,16 +424,6 @@ func (s *FabridSelector) Initialize(local, remote UDPAddr, paths []*Path) {
 			key, err := drhelper.GetASHostKeyFromReply(rep, meta)
 			if err != nil {
 				return drkey.ASHostKey{}, err
-			}
-			return key, nil
-		}, func(ctx context.Context, meta drkey.HostHostMeta) (drkey.HostHostKey, error) {
-			rep, err := client.DRKeyHostHost(ctx, drhelper.HostHostMetaToProtoRequest(meta))
-			if err != nil {
-				return drkey.HostHostKey{}, err
-			}
-			key, err := drhelper.GetHostHostKeyFromReply(rep, meta)
-			if err != nil {
-				return drkey.HostHostKey{}, err
 			}
 			return key, nil
 		})

@@ -16,11 +16,14 @@ package pan
 
 import (
 	"context"
-	"github.com/scionproto/scion/pkg/drkey"
+	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/log"
+	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/slayers"
 	"github.com/scionproto/scion/pkg/slayers/extension"
 	"github.com/scionproto/scion/pkg/snet"
+	"google.golang.org/grpc"
 	"net"
 	"net/netip"
 
@@ -98,11 +101,37 @@ func DialUDP(ctx context.Context, local netip.AddrPort, remote UDPAddr,
 func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr,
 	policy Policy, fabridConfig fabrid.SimpleFabridConfig) (Conn, *fabrid.Client, error) {
 
-	client := fabrid.NewFabridClient(*remote.snetUDPAddr(), drkey.Key{}, fabridConfig)
+	servicesInfo, err := host().sciond.SVCInfo(ctx, []addr.SVC{addr.SvcCS})
+	if err != nil {
+		return nil, nil, serrors.WrapStr("Error getting services", err)
+	}
+	controlServiceInfo := servicesInfo[addr.SvcCS][0]
+	localAddr := &net.TCPAddr{
+		IP:   net.IP(local.Addr().AsSlice()),
+		Port: 0,
+	}
+	controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
+	if err != nil {
+		return nil, nil, serrors.WrapStr("Error resolving CS", err)
+	}
+
+	log.Debug("Prepared GRPC connection", "CS", controlServiceInfo)
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		return net.DialTCP("tcp", localAddr, controlAddr)
+	}
+	grpcconn, err := grpc.DialContext(ctx, controlServiceInfo,
+		grpc.WithInsecure(), grpc.WithContextDialer(dialer))
+	if err != nil {
+		return nil, nil, serrors.WrapStr("Error connecting to CS", err)
+	}
+
+	local, err = defaultLocalAddr(local)
+	fabridConfig.LocalIA = addr.IA(host().ia)
+	fabridConfig.LocalAddr = local.Addr().String()
+	client := fabrid.NewFabridClient(*remote.snetUDPAddr(), fabridConfig, grpcconn)
 
 	selector := NewFabridSelector(client, ctx)
 
-	local, err := defaultLocalAddr(local)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -243,16 +272,12 @@ func (c *fabridDialedConn) Read(b []byte) (int, error) {
 			for _, opt := range e2eExt.Options {
 				switch opt.OptType {
 				case slayers.OptTypeFabridControl:
-					fabridControlOption, err = extension.ParseFabridControlOption(opt)
+					fabridControlOption, err = extension.ParseFabridControlOption(opt, nil)
 					if err != nil {
 						return n, err
 					}
 
-					pathState, err := c.fabridClient.GetFabridPathState(snet.PathFingerprint(path.Fingerprint))
-					if err != nil {
-						return n, err
-					}
-					err = pathState.HandleFabridControlOption(fabridControlOption)
+					err = c.fabridClient.HandleFabridControlOption(snet.PathFingerprint(path.Fingerprint), fabridControlOption)
 					if err != nil {
 						return 0, err
 					}

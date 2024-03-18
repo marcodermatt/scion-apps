@@ -280,7 +280,7 @@ func (c *fabridListenConn) ReadFromVia(b []byte) (int, UDPAddr, *Path, error) {
 		for _, opt := range e2eExt.Options {
 			switch opt.OptType {
 			case slayers.OptTypeFabridControl:
-				fabridControlOption, err := extension.ParseFabridControlOption(opt)
+				fabridControlOption, err := extension.ParseFabridControlOption(opt, identifierOption)
 				if err != nil {
 					return 0, UDPAddr{}, nil, err
 				}
