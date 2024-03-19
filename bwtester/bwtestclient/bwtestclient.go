@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/experimental/fabrid"
+	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/snet"
 	"math"
 	"net"
@@ -282,6 +283,7 @@ func main() {
 	flag.StringVar(&preference, "preference", "", "Preference sorting order for paths. "+
 		"Comma-separated list of available sorting options: "+
 		strings.Join(pan.AvailablePreferencePolicies, "|"))
+	enableFabrid := flag.Bool("fabrid", false, "Enable FABRID")
 
 	flag.Parse()
 	flagset := make(map[string]bool)
@@ -296,6 +298,13 @@ func main() {
 	}
 	policy, err := pan.PolicyFromCommandline(sequence, preference, interactive)
 	checkUsageErr(err)
+
+	logCfg := log.Config{Console: log.ConsoleConfig{Level: "debug", StacktraceLevel: "none"}}
+	if err := log.Setup(logCfg); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %s", err)
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	// use default packet size when within same AS
 	inferedPktSize := int64(DefaultPktSize)
@@ -323,7 +332,7 @@ func main() {
 	fmt.Printf("server->client: %d seconds, %d bytes, %d packets\n",
 		int(serverBwp.BwtestDuration/time.Second), serverBwp.PacketSize, serverBwp.NumPackets)
 
-	clientRes, serverRes, err := runBwtest(local.Get(), serverCCAddr, policy, clientBwp, serverBwp)
+	clientRes, serverRes, err := runBwtest(local.Get(), serverCCAddr, policy, clientBwp, serverBwp, *enableFabrid)
 	bwtest.Check(err)
 
 	fmt.Println("\nS->C results")
@@ -333,20 +342,7 @@ func main() {
 }
 
 // runBwtest runs the bandwidth test with the given parameters against the server at serverCCAddr.
-func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy,
-	clientBwp, serverBwp bwtest.Parameters) (clientRes, serverRes bwtest.Result, err error) {
-
-	polIdentifier := snet.FabridPolicyIdentifier{
-		Type:       snet.FabridGlobalPolicy,
-		Identifier: 0,
-		Index:      0,
-	}
-	fabridConfig := fabrid.SimpleFabridConfig{
-		DestinationIA:   addr.IA(serverCCAddr.IA),
-		DestinationAddr: serverCCAddr.IP.String(),
-		ValidationRatio: 255,
-		Policy:          polIdentifier,
-	}
+func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy, clientBwp, serverBwp bwtest.Parameters, enableFabrid bool) (clientRes, serverRes bwtest.Result, err error) {
 
 	// Control channel connection
 	ccSelector := pan.NewDefaultSelector()
@@ -360,7 +356,25 @@ func runBwtest(local netip.AddrPort, serverCCAddr pan.UDPAddr, policy pan.Policy
 	serverDCAddr := serverCCAddr.WithPort(serverCCAddr.Port + 1)
 
 	// Data channel connection
-	dcConn, _, err := pan.DialUDPWithFabrid(context.Background(), dcLocal, serverDCAddr, policy, fabridConfig)
+	var dcConn pan.Conn
+	if enableFabrid {
+		polIdentifier := snet.FabridPolicyIdentifier{
+			Type:       snet.FabridGlobalPolicy,
+			Identifier: 0,
+			Index:      0,
+		}
+		fabridConfig := fabrid.SimpleFabridConfig{
+			DestinationIA:   addr.IA(serverCCAddr.IA),
+			DestinationAddr: serverCCAddr.IP.String(),
+			ValidationRatio: 255,
+			Policy:          polIdentifier,
+		}
+		var client *fabrid.Client
+		dcConn, client, err = pan.DialUDPWithFabrid(context.Background(), dcLocal, serverDCAddr, policy, fabridConfig)
+		client.SetValidationRatio(0)
+	} else {
+		dcConn, err = pan.DialUDP(context.Background(), dcLocal, serverDCAddr, policy, nil)
+	}
 	if err != nil {
 		return
 	}
