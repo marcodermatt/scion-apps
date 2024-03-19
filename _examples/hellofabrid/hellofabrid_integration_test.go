@@ -38,11 +38,34 @@ func TestHelloFabridSample(t *testing.T) {
 	serverArgs := []string{"-listen", ":" + serverPort}
 
 	// Client
-	clientArgs := []string{"-count", "5", "-remote", integration.DstAddrPattern + ":" + serverPort}
+	clientArgs := []string{"-remote", integration.DstAddrPattern + ":" + serverPort}
 
 	in := integration.NewAppsIntegration(cmd, cmd, clientArgs, serverArgs)
-	in.ServerOutMatch = integration.RegExp("(?m)^Received .*: hello world .*\nWrote 24 bytes")
-	in.ClientOutMatch = integration.RegExp("(?m)^Wrote 23 bytes.\nReceived reply: take it back! .*")
+	in.ServerOutMatch = integration.RegExp("(?m)Received .*: hello fabrid .*")
+	in.ClientOutMatch = integration.RegExp("(?m)Received reply: take it back! .*")
+	// Cartesian product of src and dst IAs, a random permutation
+	// restricted to a subset to reduce the number of tests to run without significant
+	// loss of coverage
+	iaPairs := integration.DefaultIAPairs()
+	// Run the tests to completion or until a test fails,
+	// increase the ClientTimeout if clients need more time to start
+	if err := in.Run(t, iaPairs); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestHelloFabridSourceValidation(t *testing.T) {
+	cmd := integration.AppBinPath(bin)
+	// Server
+	serverPort := "12345"
+	serverArgs := []string{"-listen", ":" + serverPort}
+
+	// Client
+	clientArgs := []string{"-val-ratio", "255", "-remote", integration.DstAddrPattern + ":" + serverPort}
+
+	in := integration.NewAppsIntegration(cmd, cmd, clientArgs, serverArgs)
+	in.ServerOutMatch = integration.RegExp("(?m)Received .*: hello fabrid .*")
+	in.ClientOutMatch = integration.RegExp("(?m)[Successful validation .*]|[Not using FABRID for local traffic]\n.*Received reply: take it back!.*")
 	// Cartesian product of src and dst IAs, a random permutation
 	// restricted to a subset to reduce the number of tests to run without significant
 	// loss of coverage

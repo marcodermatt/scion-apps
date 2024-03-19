@@ -146,6 +146,8 @@ func DialUDPWithFabrid(ctx context.Context, local netip.AddrPort, remote UDPAddr
 		if err != nil {
 			return nil, nil, err
 		}
+	} else {
+		log.Info("Not using FABRID for local traffic")
 	}
 	return &fabridDialedConn{
 		dialedConn: dialedConn{

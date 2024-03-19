@@ -108,11 +108,11 @@ func ListenUDP(ctx context.Context, local netip.AddrPort,
 }
 
 func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
-	selector ReplySelector) (ListenConn, error) {
+	selector ReplySelector) (ListenConn, *fabrid.Server, error) {
 
 	local, err := defaultLocalAddr(local)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if selector == nil {
@@ -121,7 +121,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 	stats.subscribe(selector)
 	raw, slocal, err := openBaseUDPConn(ctx, local)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	selector.Initialize(slocal)
 
@@ -132,7 +132,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 	servicesInfo, err := host().sciond.SVCInfo(ctx, []addr.SVC{addr.SvcCS})
 	if err != nil {
 		log.Error("Error getting services")
-		return nil, err
+		return nil, nil, err
 	}
 	controlServiceInfo := servicesInfo[addr.SvcCS][0]
 	localAddr := &net.TCPAddr{
@@ -142,7 +142,7 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 	controlAddr, err := net.ResolveTCPAddr("tcp", controlServiceInfo)
 	if err != nil {
 		log.Error("Error resolving CS")
-		return nil, err
+		return nil, nil, err
 	}
 
 	log.Debug("Prepared GRPC connection", "CS", controlServiceInfo)
@@ -153,9 +153,9 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 		grpc.WithInsecure(), grpc.WithContextDialer(dialer))
 	if err != nil {
 		log.Error("Error connection to CS")
-		return nil, err
+		return nil, nil, err
 	}
-
+	server := fabrid.NewFabridServer(slocal.snetUDPAddr(), grpcconn)
 	return &fabridListenConn{
 		listenConn: listenConn{
 			baseUDPConn: baseUDPConn{
@@ -164,8 +164,8 @@ func ListenUDPWithFabrid(ctx context.Context, local netip.AddrPort,
 			local:    slocal,
 			selector: selector,
 		},
-		fabridServer: fabrid.NewFabridServer(slocal.snetUDPAddr(), grpcconn, 128),
-	}, nil
+		fabridServer: server,
+	}, server, nil
 }
 
 type listenConn struct {
